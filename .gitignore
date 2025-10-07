@@ -54,3 +54,6 @@ ehthumbs.db
 
 # ignore test artifacts
 test-output/
+
+# Archivos de vouchers 
+uploads/
