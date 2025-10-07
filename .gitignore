@@ -1,0 +1,56 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Dependency directories
+node_modules/
+
+# System files
+.DS_Store
+
+# Build output
+dist/
+build/
+dist-ssr/
+coverage/
+*.tsbuildinfo
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# IDE/editor configs
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS-specific
+Thumbs.db
+ehthumbs.db
+
+# ignore DB or archive files
+*.sqlite
+*.db
+*.tgz
+*.tar.gz
+*.zip
+
+# ignore test artifacts
+test-output/
