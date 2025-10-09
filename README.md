@@ -522,6 +522,23 @@ module.exports = {
   }]
 };
 ```
+## Dockerizacion
+
+### 1. Construir imagen
+`docker build -t undc-deportes-backend .`
+
+### 2. Ejecutar contenedor
+```docker run -d   --name undc-deportes-server   -p 3100:3100   --env-file .env   -v "$(pwd)/uploads:/app/uploads"   --restart unless-stopped   undc-deportes-backend
+  ```
+
+### 3. Ver logs
+`docker logs -f undc-deportes-server`
+
+### 4. Detener
+`docker stop undc-deportes-server`
+
+### 5. Eliminar
+`docker rm undc-deportes-server`
 
 ## 🤝 Contribución
 

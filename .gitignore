@@ -55,5 +55,6 @@ ehthumbs.db
 # ignore test artifacts
 test-output/
 
-# Archivos de vouchers 
-uploads/
+# Archivos de vouchers (ignorar todos excepto .gitkeep)
+uploads/*
+!uploads/.gitkeep
