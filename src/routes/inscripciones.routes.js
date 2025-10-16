@@ -149,6 +149,15 @@ ruta.post("/", subir.single("comprobante"), async (req, res) => {
           });
         }
         break;
+      
+      case 2:
+        if (totalJugadores < 4 || totalJugadores > 10) {
+          await limpiarArchivo(req.file.filename);
+          return res.status(400).json({
+            mensaje: "Básquet requiere entre 4 a 10 jugadores"
+          })
+        }
+        break;
 
       case 3: // Vóley
         if (totalJugadores < 5 || totalJugadores > 10) {
@@ -166,7 +175,7 @@ ruta.post("/", subir.single("comprobante"), async (req, res) => {
         break;
 
       case 5: // Gincana
-        if (totalJugadores < 3 || totalJugadores > 16) {
+        if (totalJugadores < 3 || totalJugadores > 33) {
           await limpiarArchivo(req.file.filename);
           return res.status(400).json({
             mensaje: "Gincana requiere entre 3 y 16 jugadores",
@@ -333,11 +342,12 @@ ruta.post("/", subir.single("comprobante"), async (req, res) => {
       const mapaMonto = {
         regular: 80,
         adicional: 15,
+        basket: 10,
       };
 
       const banco = "Yape";
       const monto =
-        tipoPago === "regular" || tipoPago === "adicional"
+        tipoPago === "regular" || tipoPago === "adicional" || tipoPago === 'basket'
           ? mapaMonto[tipoPago]
           : null;
       const eventoId = 2; // ID del evento de inscripción
