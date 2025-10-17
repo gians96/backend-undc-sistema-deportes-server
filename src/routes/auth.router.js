@@ -43,13 +43,7 @@ auth.post("/login", async (req, res) => {
     // Generar UUID para la sesión
     const idSesion = uuidv4();
     const ahora = new Date();
-    const expiracion = new Date(ahora.getTime() + 60 * 60 * 1000); // 1h
-
-    // Opcional: Actualizar el campo 'ultimo_login' en la tabla 'usuarios'
-    await query("UPDATE usuarios SET ultimo_login = ? WHERE id = ?", [
-      ahora,
-      user.id,
-    ]);
+    const expiracion = new Date(ahora.getTime() + 60 * 60 * 1000 * 4); // 4h
 
     // Guardar la sesión en la DB, inicializando 'ultima_actividad' a la hora actual
     const insertSql = `
