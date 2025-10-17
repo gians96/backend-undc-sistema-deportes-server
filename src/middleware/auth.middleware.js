@@ -11,7 +11,9 @@ export const verificarAutenticacion = async (req, res, next) => {
         .json({ mensaje: "No autenticado - no hay cookie" });
     }
 
-    const ahora = new Date(); // 1. Verificar si la sesión existe y está activa (no expirada ni inactiva)
+    const ahora = new Date(); // esta hora está adelantado por zona UTC :v se le va restar -5 horas manualmente pipipi nomas
+    const horaCerruana = new Date(ahora);
+    horaCerruana.setHours(horaCerruana.getHours() - 5);
 
     const sql = `
       SELECT u.id, u.usuario, u.rol, s.ultima_actividad
@@ -23,7 +25,7 @@ export const verificarAutenticacion = async (req, res, next) => {
       LIMIT 1
     `;
 
-    const resultados = await query(sql, [idSesion, ahora, ahora]);
+    const resultados = await query(sql, [idSesion, horaCerruana, horaCerruana]);
 
     if (resultados.length === 0) {
       return res.status(401).json({ mensaje: "Sesión inválida o expirada" });
