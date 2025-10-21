@@ -4,24 +4,12 @@ import { conexion, query } from "../config/database.js";
 
 const torneo = Router();
 
-// Tabla de estructura de torneos según partidos.md
-const ESTRUCTURA_TORNEO = {
-  6: { equiposJuegan: 4, equiposDescansan: 2, totalRondas: 3 },
-  7: { equiposJuegan: 6, equiposDescansan: 1, totalRondas: 3 },
-  8: { equiposJuegan: 8, equiposDescansan: 0, totalRondas: 3 },
-  9: { equiposJuegan: 2, equiposDescansan: 1, totalRondas: 4, nota: 'previa + 6 en R2' },
-  10: { equiposJuegan: 4, equiposDescansan: 0, totalRondas: 4, nota: 'previa + 6 en R2' },
-  11: { equiposJuegan: 6, equiposDescansan: 5, totalRondas: 4 },
-  12: { equiposJuegan: 8, equiposDescansan: 4, totalRondas: 3 },
-  13: { equiposJuegan: 10, equiposDescansan: 3, totalRondas: 4 },
-  14: { equiposJuegan: 12, equiposDescansan: 2, totalRondas: 4 },
-  15: { equiposJuegan: 14, equiposDescansan: 1, totalRondas: 4 },
-  16: { equiposJuegan: 16, equiposDescansan: 0, totalRondas: 4 }
-};
+// La estructura del torneo ahora se calcula dinámicamente en el endpoint POST /generar.
 
 /**
  * GET /api/admin/torneo/:deporteId
- * Endpoint unificado que devuelve equipos + enfrentamientos + estadísticas
+ * Endpoint unificado que devuelve equipos + enfrentamientos + estadísticas.
+ * Maneja el caso especial de Ajedrez (deporteId 4) para mostrar jugadores individuales.
  */
 torneo.get("/:deporteId", async (req, res) => {
   const pool = await conexion();
@@ -30,68 +18,119 @@ torneo.get("/:deporteId", async (req, res) => {
   try {
     const { deporteId } = req.params;
     const eventoId = 2; // Semana Sistémica Deportes 2025
+    const isChess = parseInt(deporteId, 10) === 4;
 
-    // Llamar SP optimizado mostrar_equipos
-    const [equiposResult] = await conn.query(
-      'CALL mostrar_equipos(?, ?)',
-      [eventoId, deporteId]
-    );
-    const equipos = equiposResult[0] || [];
+    let equiposOriginal;
+    let enfrentamientos;
 
-    // Obtener enfrentamientos existentes con información de fase
-    const [enfrentamientos] = await conn.query(`
-      SELECT
-        enf.id AS enfrentamiento_id,
-        dp.id as detalle_partido_id,
-        enf.partido_numero,
-        f.nombre AS fase_nombre,
-        f.orden AS fase_orden,
-        e1.id AS equipo_1_id,
-        e1.nombre AS equipo_1_nombre,
-        c1.nombre AS equipo_1_ciclo,
-        e2.id AS equipo_2_id,
-        e2.nombre AS equipo_2_nombre,
-        c2.nombre AS equipo_2_ciclo,
-        CASE WHEN enf.equipo_2_id IS NULL THEN TRUE ELSE FALSE END AS es_bye,
-        dp.estado_id,
-        dp.puntos_equipo_1,
-        dp.puntos_equipo_2,
-        dp.ganador_id
-      FROM enfrentamientos enf
-      INNER JOIN detalle_partido dp ON dp.partido_id = enf.id
-      LEFT JOIN fases_evento f ON f.id = dp.fase_id
-      LEFT JOIN equipos e1 ON e1.id = enf.equipo_1_id
-      LEFT JOIN ciclos c1 ON c1.id = e1.ciclo_id
-      LEFT JOIN equipos e2 ON e2.id = enf.equipo_2_id
-      LEFT JOIN ciclos c2 ON c2.id = e2.ciclo_id
-      WHERE dp.evento_id = ?
-        AND (e1.deporte_id = ? OR e2.deporte_id = ?)
-      ORDER BY f.orden, enf.partido_numero
-    `, [eventoId, deporteId, deporteId]);
+    if (isChess) {
+      // --- Lógica para Ajedrez ---
+      // 1. Obtener la lista de JUGADORES
+      [equiposOriginal] = await conn.query(`
+        SELECT
+            e.id AS id_equipo,
+            j.nombre AS nombre_equipo,
+            d.nombre AS deporte,
+            ci.nombre AS ciclo,
+            i.cantidad_participantes,
+            j.nombre AS representante_nombre,
+            e.celular AS representante_telefono,
+            v.fecha_validacion AS fecha_inscripcion,
+            v.estado AS estado_inscripcion,
+            'disponible' AS estado_sorteo
+        FROM jugadores j
+        JOIN equipo_jugador ej ON j.id = ej.jugador_id
+        JOIN equipos e ON ej.equipo_id = e.id
+        JOIN deportes d ON e.deporte_id = d.id
+        JOIN ciclos ci ON e.ciclo_id = ci.id
+        JOIN inscripciones i ON i.equipo_id = e.id
+        JOIN vouchers v ON v.inscripcion_id = i.id
+        WHERE i.evento_id = ? AND v.estado = 'validado' AND e.deporte_id = ?
+      `, [eventoId, deporteId]);
 
-    // Calcular estadísticas
-    // El SP ahora devuelve solo una fila por equipo (enfrentamiento más reciente)
-    const disponibles = equipos.filter(eq => eq.estado_sorteo === 'disponible').length;
-    const asignados = equipos.filter(eq => eq.estado_sorteo === 'asignado').length;
+      // 2. Obtener los enfrentamientos con nombres de JUGADORES
+      [enfrentamientos] = await conn.query(`
+        SELECT
+            enf.id AS partido_id, dp.id as detalle_partido_id, enf.partido_numero,
+            f.id AS fase_id, f.nombre AS fase_nombre, f.orden AS fase_orden,
+            e1.id AS equipo_1_id, j1.nombre AS equipo_1_nombre, c1.nombre AS equipo_1_ciclo,
+            e2.id AS equipo_2_id, j2.nombre AS equipo_2_nombre, c2.nombre AS equipo_2_ciclo,
+            CASE WHEN enf.equipo_2_id IS NULL THEN 1 ELSE 0 END AS es_bye,
+            ep.estado, dp.puntos_equipo_1, dp.puntos_equipo_2, dp.ganador_id
+        FROM enfrentamientos enf
+        INNER JOIN detalle_partido dp ON dp.partido_id = enf.id
+        INNER JOIN estados_partido ep ON dp.estado_id = ep.id
+        LEFT JOIN fases_evento f ON f.id = dp.fase_id
+        LEFT JOIN equipos e1 ON e1.id = enf.equipo_1_id
+        LEFT JOIN equipo_jugador ej1 ON e1.id = ej1.equipo_id
+        LEFT JOIN jugadores j1 ON ej1.jugador_id = j1.id
+        LEFT JOIN ciclos c1 ON c1.id = e1.ciclo_id
+        LEFT JOIN equipos e2 ON e2.id = enf.equipo_2_id
+        LEFT JOIN equipo_jugador ej2 ON e2.id = ej2.equipo_id
+        LEFT JOIN jugadores j2 ON ej2.jugador_id = j2.id
+        LEFT JOIN ciclos c2 ON c2.id = e2.ciclo_id
+        WHERE dp.evento_id = ? AND e1.deporte_id = ?
+        ORDER BY f.orden, enf.partido_numero
+      `, [eventoId, deporteId]);
 
-    // Obtener información del deporte
-    const [deporteInfo] = await conn.query(
-      'SELECT id, nombre FROM deportes WHERE id = ?',
-      [deporteId]
-    );
+    } else {
+      // --- Lógica para deportes grupales ---
+      // 1. Obtener equipos usando el SP existente
+      const [equiposResult] = await conn.query('CALL mostrar_equipos_2(?, ?)', [eventoId, deporteId]);
+      equiposOriginal = equiposResult[0] || [];
 
-    res.json({
-      deporte: {
-        id: parseInt(deporteId),
-        nombre: deporteInfo[0]?.nombre || 'N/A'
-      },
-      equipos: equipos,
-      enfrentamientos: enfrentamientos.map(enf => ({
+      // 2. Obtener todos los enfrentamientos con su estado y fase
+      [enfrentamientos] = await conn.query(`
+        SELECT
+          enf.id AS partido_id, dp.id as detalle_partido_id, enf.partido_numero,
+          f.id AS fase_id, f.nombre AS fase_nombre, f.orden AS fase_orden,
+          e1.id AS equipo_1_id, e1.nombre AS equipo_1_nombre, c1.nombre AS equipo_1_ciclo,
+          e2.id AS equipo_2_id, e2.nombre AS equipo_2_nombre, c2.nombre AS equipo_2_ciclo,
+          CASE WHEN enf.equipo_2_id IS NULL THEN 1 ELSE 0 END AS es_bye,
+          ep.estado, dp.puntos_equipo_1, dp.puntos_equipo_2, dp.ganador_id
+        FROM enfrentamientos enf
+        INNER JOIN detalle_partido dp ON dp.partido_id = enf.id
+        INNER JOIN estados_partido ep ON dp.estado_id = ep.id
+        LEFT JOIN fases_evento f ON f.id = dp.fase_id
+        LEFT JOIN equipos e1 ON e1.id = enf.equipo_1_id
+        LEFT JOIN ciclos c1 ON c1.id = e1.ciclo_id
+        LEFT JOIN equipos e2 ON e2.id = enf.equipo_2_id
+        LEFT JOIN ciclos c2 ON c2.id = e2.ciclo_id
+        WHERE dp.evento_id = ? AND e1.deporte_id = ?
+        ORDER BY f.orden, enf.partido_numero
+      `, [eventoId, deporteId]);
+    }
+
+    // 3. Procesar y estructurar datos (Lógica común)
+    const equiposLimpios = equiposOriginal.map(eq => ({
+      id_equipo: eq.id_equipo,
+      nombre_equipo: eq.nombre_equipo,
+      deporte: eq.deporte,
+      ciclo: eq.ciclo,
+      cantidad_participantes: eq.cantidad_participantes,
+      representante_nombre: eq.representante_nombre,
+      representante_telefono: eq.representante_telefono,
+      fecha_inscripcion: eq.fecha_inscripcion,
+      estado_inscripcion: eq.estado_inscripcion,
+      estado_sorteo: eq.estado_sorteo
+    }));
+
+    // Agrupar partidos por ronda (fase)
+    const rondasMap = new Map();
+    for (const enf of enfrentamientos) {
+      if (!rondasMap.has(enf.fase_id)) {
+        rondasMap.set(enf.fase_id, {
+          fase_id: enf.fase_id,
+          nombre: enf.fase_nombre,
+          orden: enf.fase_orden,
+          partidos: []
+        });
+      }
+
+      rondasMap.get(enf.fase_id).partidos.push({
+        partido_id: enf.partido_id,
         detalle_partido_id: enf.detalle_partido_id,
-        enfrentamiento_id: enf.enfrentamiento_id,
-        fase_nombre: enf.fase_nombre,
-        fase_orden: enf.fase_orden,
-        partido_numero: enf.partido_numero,
+        numero: enf.partido_numero,
         equipo_1: enf.equipo_1_id ? {
           id: enf.equipo_1_id,
           nombre: enf.equipo_1_nombre,
@@ -103,18 +142,40 @@ torneo.get("/:deporteId", async (req, res) => {
           ciclo: enf.equipo_2_ciclo
         } : null,
         es_bye: Boolean(enf.es_bye),
-        estado_id: enf.estado_id,
+        estado: enf.estado, // ej: 'pendiente', 'jugado'
         resultado: {
           puntos_equipo_1: enf.puntos_equipo_1,
           puntos_equipo_2: enf.puntos_equipo_2
         },
         ganador_id: enf.ganador_id
-      })),
+      });
+    }
+
+    const rondas = Array.from(rondasMap.values()).sort((a, b) => a.orden - b.orden);
+
+    // 4. Calcular estadísticas
+    const disponibles = equiposOriginal.filter(eq => eq.estado_sorteo === 'disponible').length;
+    const asignados = equiposOriginal.length - disponibles;
+
+    // 5. Obtener información del deporte
+    const [deporteInfo] = await conn.query(
+      'SELECT id, nombre FROM deportes WHERE id = ?',
+      [deporteId]
+    );
+
+    // 6. Enviar respuesta estructurada
+    res.json({
+      deporte: {
+        id: parseInt(deporteId),
+        nombre: deporteInfo[0]?.nombre || 'N/A'
+      },
+      equipos: equiposLimpios,
+      rondas: rondas,
       estadisticas: {
-        total_equipos: equipos.length,
+        total_equipos: equiposOriginal.length,
         equipos_disponibles: disponibles,
         equipos_asignados: asignados,
-        total_enfrentamientos: enfrentamientos.length
+        total_partidos: enfrentamientos.length
       }
     });
 
@@ -131,7 +192,8 @@ torneo.get("/:deporteId", async (req, res) => {
 
 /**
  * POST /api/admin/torneo/generar
- * Genera todo el torneo en una sola llamada con sorteo aleatorio
+ * Genera todo el torneo con una estructura dinámica y sorteo aleatorio.
+ * Admite de 4 equipos en adelante.
  */
 torneo.post("/generar", async (req, res) => {
   const pool = await conexion();
@@ -139,146 +201,169 @@ torneo.post("/generar", async (req, res) => {
 
   try {
     const { deporteId, equipos } = req.body;
-    const eventoId = 2;
+    const eventoId = 2; // Semana Sistémica Deportes 2025
 
-    // Validar cantidad de equipos
-    if (!equipos || equipos.length < 6 || equipos.length > 16) {
+    // 1. Validar cantidad de equipos
+    if (!equipos || equipos.length < 4) {
       return res.status(400).json({
-        mensaje: 'Se requieren entre 6 y 16 equipos para generar un torneo',
-        equipos_recibidos: equipos?.length || 0
+        mensaje: `Se requieren al menos 4 equipos para generar un torneo. Equipos recibidos: ${equipos?.length || 0}`,
       });
     }
 
     await conn.beginTransaction();
 
-    // Calcular estructura del torneo
-    const estructura = ESTRUCTURA_TORNEO[equipos.length];
-    if (!estructura) {
-      throw new Error(`No hay estructura definida para ${equipos.length} equipos`);
+    // 2. Calcular estructura dinámica del torneo
+    const numEquipos = equipos.length;
+    // Calcula el tamaño del bracket (la siguiente potencia de 2)
+    const bracketSize = Math.pow(2, Math.ceil(Math.log2(numEquipos)));
+    const totalRondas = Math.log2(bracketSize);
+    const numByes = bracketSize - numEquipos; // Equipos que pasan directo
+    const numEquiposEnRonda1 = numEquipos - numByes;
+    const numPartidosRonda1 = numEquiposEnRonda1 / 2;
+
+    // 3. Determinar fase inicial
+    // Fases por defecto: Final(4), Semifinal(3), Cuartos(2), Octavos(1), Ronda 1(0)
+    // El orden se calcula para que la última ronda sea la Final (orden 4)
+    const ordenFaseInicial = 4 - (totalRondas - 1);
+
+    if (ordenFaseInicial < 0) {
+      await conn.rollback();
+      return res.status(500).json({
+        mensaje: `El número de equipos (${numEquipos}) es demasiado grande para la estructura de fases actual. Se necesitan más fases en la base de datos.`
+      });
     }
 
-    // Determinar fase inicial según total de rondas
-    // Fases disponibles: Ronda 1 (0), Octavos (1), Cuartos (2), Semifinal (3), Final (4)
-    // - 3 rondas (6-8, 12 equipos): Cuartos (2) → Semifinal (3) → Final (4)
-    // - 4 rondas (9-16 equipos): Ronda 1/Octavos → Cuartos → Semifinal → Final
-    const ordenFaseInicial = 5 - estructura.totalRondas; // 3 rondas → 2 (Cuartos), 4 rondas → 1 (Octavos)
+    const [fases] = await conn.query(
+      'SELECT id, nombre, orden FROM fases_evento WHERE evento_id = ? AND orden = ? LIMIT 1',
+      [eventoId, ordenFaseInicial]
+    );
 
-    // Para equipos que requieren ronda previa (9-10), usar Ronda 1 (orden = 0)
-    const usarRondaPrevia = equipos.length >= 9 && equipos.length <= 10;
-    const ordenInicial = usarRondaPrevia ? 0 : ordenFaseInicial;
-
-    // Obtener fase inicial
-    let [fases] = await conn.query(`
-      SELECT id, nombre, orden FROM fases_evento
-      WHERE evento_id = ? AND orden = ?
-      LIMIT 1
-    `, [eventoId, ordenInicial]);
-
-    let faseInicialId = fases[0]?.id;
-    let faseInicialNombre = fases[0]?.nombre;
-
-    if (!faseInicialId) {
-      throw new Error(`No existe la fase con orden ${ordenInicial} para el evento ${eventoId}`);
+    if (!fases.length) {
+      await conn.rollback();
+      return res.status(500).json({
+        mensaje: `No se encontró una fase inicial con orden ${ordenFaseInicial} para el evento ${eventoId}.`
+      });
     }
+    const { id: faseInicialId, nombre: faseInicialNombre } = fases[0];
 
-    // Sorteo aleatorio de equipos
+    // 4. Sorteo aleatorio y asignación de byes
     const equiposAleatorios = [...equipos].sort(() => Math.random() - 0.5);
+    // Los equipos con bye son los primeros en la lista aleatoria
+    const equiposConBye = equiposAleatorios.slice(0, numByes);
+    // El resto de equipos juegan la primera ronda
+    const equiposQueJuegan = equiposAleatorios.slice(numByes);
 
-    // Dividir equipos según la estructura
-    const equiposQueJuegan = equiposAleatorios.slice(0, estructura.equiposJuegan);
-    const equiposQueDescansan = equiposAleatorios.slice(estructura.equiposJuegan);
-
-    const ronda1 = [];
-    const partidosRonda1 = Math.floor(estructura.equiposJuegan / 2);
+    const partidosGenerados = [];
     let numeroPartido = 1;
 
-    // Generar enfrentamientos de Ronda 1 (equipos que juegan)
-    for (let i = 0; i < partidosRonda1; i++) {
+    // 5. Generar enfrentamientos para equipos que juegan
+    for (let i = 0; i < numPartidosRonda1; i++) {
       const equipo1 = equiposQueJuegan[i * 2];
       const equipo2 = equiposQueJuegan[i * 2 + 1];
 
-      // Insertar enfrentamiento
-      const [enfResult] = await conn.query(`
-        INSERT INTO enfrentamientos (equipo_1_id, equipo_2_id, partido_numero)
-        VALUES (?, ?, ?)
-      `, [equipo1.id, equipo2.id, numeroPartido]);
+      const [enfResult] = await conn.query(
+        'INSERT INTO enfrentamientos (equipo_1_id, equipo_2_id, partido_numero) VALUES (?, ?, ?)',
+        [equipo1.id, equipo2.id, numeroPartido]
+      );
 
-      // Insertar detalle_partido
-      await conn.query(`
-        INSERT INTO detalle_partido (partido_id, estado_id, evento_id, fase_id)
-        VALUES (?, 1, ?, ?)
-      `, [enfResult.insertId, eventoId, faseInicialId]);
+      await conn.query(
+        'INSERT INTO detalle_partido (partido_id, estado_id, evento_id, fase_id) VALUES (?, 1, ?, ?)',
+        [enfResult.insertId, eventoId, faseInicialId]
+      );
 
-      ronda1.push({
+      partidosGenerados.push({
         enfrentamiento_id: enfResult.insertId,
         partido_numero: numeroPartido,
         equipo_1: equipo1,
         equipo_2: equipo2,
-        es_bye: false
+        es_bye: false,
       });
 
       numeroPartido++;
     }
 
-    // ✅ NUEVO: Generar byes para equipos que descansan
-    for (const equipo of equiposQueDescansan) {
-      // Insertar enfrentamiento con equipo_2_id = null (bye)
-      const [enfResult] = await conn.query(`
-        INSERT INTO enfrentamientos (equipo_1_id, equipo_2_id, partido_numero)
-        VALUES (?, NULL, ?)
-      `, [equipo.id, numeroPartido]);
+    // 6. Generar "enfrentamientos" para equipos con bye
+    for (const equipo of equiposConBye) {
+      const [enfResult] = await conn.query(
+        'INSERT INTO enfrentamientos (equipo_1_id, equipo_2_id, partido_numero) VALUES (?, NULL, ?)',
+        [equipo.id, numeroPartido]
+      );
 
-      // Insertar detalle_partido con estado "jugado" (pasa automáticamente)
-      await conn.query(`
-        INSERT INTO detalle_partido (partido_id, estado_id, evento_id, fase_id, ganador_id)
-        VALUES (?, 2, ?, ?, ?)
-      `, [enfResult.insertId, eventoId, faseInicialId, equipo.id]);
+      // Los byes avanzan automáticamente: estado 'jugado' y ganador predefinido
+      await conn.query(
+        'INSERT INTO detalle_partido (partido_id, estado_id, evento_id, fase_id, ganador_id) VALUES (?, 2, ?, ?, ?)',
+        [enfResult.insertId, eventoId, faseInicialId, equipo.id]
+      );
 
-      ronda1.push({
+      partidosGenerados.push({
         enfrentamiento_id: enfResult.insertId,
         partido_numero: numeroPartido,
         equipo_1: equipo,
         equipo_2: null,
-        es_bye: true
+        es_bye: true,
       });
 
       numeroPartido++;
     }
 
-    // Obtener fases existentes para el torneo (desde la fase inicial hacia adelante)
-    const [fasesExistentes] = await conn.query(`
-      SELECT id, nombre, orden
-      FROM fases_evento
-      WHERE evento_id = ? AND orden >= ?
-      ORDER BY orden
-    `, [eventoId, ordenInicial]);
+    // 7. Obtener todas las fases que se usarán en el torneo
+    const [fasesDelTorneo] = await conn.query(
+      'SELECT id, nombre, orden FROM fases_evento WHERE evento_id = ? AND orden >= ? ORDER BY orden',
+      [eventoId, ordenFaseInicial]
+    );
 
     await conn.commit();
 
+    // Post-procesamiento para Ajedrez: asegurar nombres de jugadores en la respuesta
+    if (parseInt(deporteId, 10) === 4) {
+      const allPlayerTeamIds = equipos.map(p => p.id);
+      if (allPlayerTeamIds.length > 0) {
+        const [playerNames] = await conn.query(`
+            SELECT e.id AS equipo_id, j.nombre
+            FROM equipos e
+            JOIN equipo_jugador ej ON e.id = ej.equipo_id
+            JOIN jugadores j ON ej.jugador_id = j.id
+            WHERE e.id IN (?)
+        `, [allPlayerTeamIds]);
+        
+        const playerNamesMap = new Map(playerNames.map(p => [p.equipo_id, p.nombre]));
+
+        partidosGenerados.forEach(partido => {
+            if (partido.equipo_1 && playerNamesMap.has(partido.equipo_1.id)) {
+                partido.equipo_1.nombre = playerNamesMap.get(partido.equipo_1.id);
+            }
+            if (partido.equipo_2 && playerNamesMap.has(partido.equipo_2.id)) {
+                partido.equipo_2.nombre = playerNamesMap.get(partido.equipo_2.id);
+            }
+        });
+      }
+    }
+
+    // 8. Enviar respuesta
     res.json({
-      mensaje: 'Torneo generado exitosamente',
+      mensaje: 'Torneo generado exitosamente con estructura dinámica.',
       torneo: {
         deporteId: parseInt(deporteId),
-        totalEquipos: equipos.length,
-        totalRondas: estructura.totalRondas,
+        totalEquipos: numEquipos,
+        totalRondas: totalRondas,
         faseInicial: {
           id: faseInicialId,
           nombre: faseInicialNombre,
-          orden: ordenInicial
+          orden: ordenFaseInicial,
         },
         estructura: {
-          equipos_juegan_fase_inicial: estructura.equiposJuegan,
-          equipos_descansan: estructura.equiposDescansan,
-          partidos_fase_inicial: partidosRonda1,
-          byes_fase_inicial: equiposQueDescansan.length
+          bracket_size: bracketSize,
+          equipos_juegan_fase_inicial: equiposQueJuegan.length,
+          equipos_con_bye: numByes,
+          partidos_fase_inicial: numPartidosRonda1,
         },
-        rondas: fasesExistentes.map((f, index) => ({
+        rondas: fasesDelTorneo.map((f, index) => ({
           fase_id: f.id,
           nombre: f.nombre,
           orden: f.orden,
-          partidos: index === 0 ? ronda1 : [] // Solo la primera fase tiene partidos generados
-        }))
-      }
+          partidos: index === 0 ? partidosGenerados.sort((a, b) => a.partido_numero - b.partido_numero) : [],
+        })),
+      },
     });
 
   } catch (error) {
@@ -286,7 +371,7 @@ torneo.post("/generar", async (req, res) => {
     console.error('Error al generar torneo:', error.message);
     res.status(500).json({
       mensaje: 'Error al generar torneo',
-      error: error.message
+      error: error.message,
     });
   } finally {
     conn.release();
@@ -295,7 +380,7 @@ torneo.post("/generar", async (req, res) => {
 
 /**
  * POST /api/admin/torneo/avanzar-ronda
- * Avanza automáticamente a la siguiente ronda con validaciones
+ * Avanza automáticamente a la siguiente ronda, manteniendo la lógica del bracket.
  */
 torneo.post("/avanzar-ronda", async (req, res) => {
   const pool = await conexion();
@@ -313,164 +398,160 @@ torneo.post("/avanzar-ronda", async (req, res) => {
 
     await conn.beginTransaction();
 
-    // Validar que todos los partidos estén finalizados
+    // 1. Validar que todos los partidos de la fase estén finalizados
     const [pendientes] = await conn.query(`
-      SELECT COUNT(*) AS total
-      FROM enfrentamientos enf
-      INNER JOIN detalle_partido dp ON dp.partido_id = enf.id
-      INNER JOIN equipos e ON e.id IN (enf.equipo_1_id, enf.equipo_2_id)
-      WHERE e.deporte_id = ?
-        AND dp.fase_id = ?
-        AND dp.estado_id != 2
-    `, [deporteId, faseActualId]);
+      SELECT COUNT(dp.id) AS total
+      FROM detalle_partido dp
+      JOIN enfrentamientos enf ON dp.partido_id = enf.id
+      JOIN equipos e ON enf.equipo_1_id = e.id
+      WHERE dp.fase_id = ?
+        AND e.deporte_id = ?
+        AND dp.estado_id != 2 -- 2 = 'jugado'
+    `, [faseActualId, deporteId]);
 
     if (pendientes[0].total > 0) {
       await conn.rollback();
       return res.status(400).json({
-        mensaje: 'Aún hay partidos pendientes en la ronda actual',
+        mensaje: 'Aún hay partidos pendientes en la ronda actual. No se puede avanzar.',
         partidos_pendientes: pendientes[0].total
       });
     }
 
-    // 1. Obtener ganadores de partidos REALES (no BYEs)
-    // Excluir enfrentamientos donde equipo_2_id es NULL (BYEs)
-    const [ganadores] = await conn.query(`
-      SELECT DISTINCT dp.ganador_id AS equipo_id
-      FROM enfrentamientos enf
-      INNER JOIN detalle_partido dp ON dp.partido_id = enf.id
-      INNER JOIN equipos e ON e.id IN (enf.equipo_1_id, enf.equipo_2_id)
-      WHERE e.deporte_id = ?
-        AND dp.fase_id = ?
-        AND dp.estado_id = 2
-        AND dp.ganador_id IS NOT NULL
-        AND enf.equipo_2_id IS NOT NULL
-    `, [deporteId, faseActualId]);
-
-    // 2. Obtener equipos con BYE en la fase actual
-    // Los BYEs son equipos que avanzaron automáticamente (equipo_2_id = NULL)
-    const [equiposConBye] = await conn.query(`
-      SELECT DISTINCT enf.equipo_1_id AS equipo_id
-      FROM enfrentamientos enf
-      INNER JOIN detalle_partido dp ON dp.partido_id = enf.id
+    // 2. Obtener equipos que avanzan, ORDENADOS por el número de partido de la fase actual
+    // Esto es CRÍTICO para mantener la estructura del bracket.
+    const [equiposQueAvanzan] = await conn.query(`
+      SELECT
+          dp.ganador_id AS equipo_id,
+          enf.partido_numero
+      FROM detalle_partido dp
+      JOIN enfrentamientos enf ON dp.partido_id = enf.id
+      JOIN equipos e ON dp.ganador_id = e.id
       WHERE dp.fase_id = ?
-        AND enf.equipo_2_id IS NULL
-        AND dp.estado_id = 2
+        AND dp.estado_id = 2 -- Partido jugado (incluye byes)
         AND dp.ganador_id IS NOT NULL
-    `, [faseActualId]);
+        AND e.deporte_id = ?
+      ORDER BY enf.partido_numero ASC
+    `, [faseActualId, deporteId]);
 
-    let equiposQueDescansaron = equiposConBye;
-
-    // 3. Combinar ganadores + equipos que descansaron (BYEs)
-    const equiposParaSiguienteFase = [
-      ...ganadores.map(g => ({ equipo_id: g.equipo_id })),
-      ...equiposQueDescansaron.map(e => ({ equipo_id: e.equipo_id }))
-    ];
-
-    if (equiposParaSiguienteFase.length === 0) {
+    if (equiposQueAvanzan.length === 0) {
       await conn.rollback();
       return res.status(400).json({
-        mensaje: 'No hay equipos para avanzar a la siguiente fase'
+        mensaje: 'No hay equipos ganadores o con bye en esta fase para avanzar.'
       });
     }
 
-    // ✅ NUEVO: Si solo queda 1 equipo, ese equipo es el campeón
-    if (equiposParaSiguienteFase.length === 1) {
-      const [equipoCampeon] = await conn.query(`
+    // 3. Verificar si ya hay un campeón
+    if (equiposQueAvanzan.length === 1) {
+      const campeonEquipoId = equiposQueAvanzan[0].equipo_id;
+      let [campeonInfo] = await conn.query(`
         SELECT e.id, e.nombre, ci.nombre AS ciclo
         FROM equipos e
         INNER JOIN ciclos ci ON e.ciclo_id = ci.id
         WHERE e.id = ?
-      `, [equiposParaSiguienteFase[0].equipo_id]);
+      `, [campeonEquipoId]);
+
+      let campeon = campeonInfo[0] || null;
+
+      // Para Ajedrez, obtener el nombre del jugador
+      if (campeon && parseInt(deporteId, 10) === 4) {
+        const [playerInfo] = await conn.query(`
+            SELECT j.nombre
+            FROM jugadores j
+            JOIN equipo_jugador ej ON j.id = ej.jugador_id
+            WHERE ej.equipo_id = ?
+        `, [campeonEquipoId]);
+        
+        if (playerInfo.length > 0) {
+            campeon.nombre = playerInfo[0].nombre;
+        }
+      }
 
       await conn.commit();
 
       return res.json({
         mensaje: '¡Torneo finalizado! Campeón definido.',
         torneo_finalizado: true,
-        campeon: {
-          id: equipoCampeon[0].id,
-          nombre: equipoCampeon[0].nombre,
-          ciclo: equipoCampeon[0].ciclo
-        },
-        fase_actual: {
-          id: faseActualId
-        }
+        campeon: campeon,
+        fase_actual: { id: faseActualId }
       });
     }
 
-    // Obtener siguiente fase
-    const [faseActual] = await conn.query(`
-      SELECT orden FROM fases_evento WHERE id = ?
-    `, [faseActualId]);
-
-    const [siguienteFase] = await conn.query(`
+    // 4. Obtener la siguiente fase
+    const [faseActual] = await conn.query('SELECT orden FROM fases_evento WHERE id = ?', [faseActualId]);
+    
+    const [siguienteFaseArr] = await conn.query(`
       SELECT id, nombre, orden FROM fases_evento
       WHERE evento_id = ? AND orden > ?
       ORDER BY orden ASC
       LIMIT 1
     `, [eventoId, faseActual[0].orden]);
 
-    if (!siguienteFase.length) {
+    if (!siguienteFaseArr.length) {
       await conn.rollback();
+      // Este caso debería ser manejado por la lógica del campeón, pero como salvaguarda:
       return res.status(400).json({
-        mensaje: 'No hay siguiente fase configurada. El torneo ha finalizado.'
+        mensaje: 'No hay una siguiente fase configurada. El torneo podría haber finalizado.'
       });
     }
+    const siguienteFase = siguienteFaseArr[0];
 
-    const siguienteFaseId = siguienteFase[0].id;
+    // 5. Crear los nuevos enfrentamientos para la siguiente ronda
     const partidosNuevos = [];
+    let nuevoPartidoNumero = 1;
 
-    // Crear enfrentamientos de siguiente ronda usando equipos clasificados (ganadores + equipos que descansaron)
-    for (let i = 0; i < equiposParaSiguienteFase.length; i += 2) {
-      const equipo1 = equiposParaSiguienteFase[i];
-      const equipo2 = equiposParaSiguienteFase[i + 1] || null;
+    for (let i = 0; i < equiposQueAvanzan.length; i += 2) {
+      const equipo1 = equiposQueAvanzan[i];
+      const equipo2 = equiposQueAvanzan[i + 1] || null; // Puede haber un bye en la siguiente ronda
       const esBye = equipo2 === null;
 
-      const [enfResult] = await conn.query(`
-        INSERT INTO enfrentamientos (equipo_1_id, equipo_2_id, partido_numero)
-        VALUES (?, ?, ?)
-      `, [equipo1.equipo_id, equipo2?.equipo_id || null, Math.floor(i / 2) + 1]);
+      const [enfResult] = await conn.query(
+        'INSERT INTO enfrentamientos (equipo_1_id, equipo_2_id, partido_numero) VALUES (?, ?, ?)',
+        [equipo1.equipo_id, esBye ? null : equipo2.equipo_id, nuevoPartidoNumero]
+      );
 
-      // ✅ Si es BYE, marcar como finalizado automáticamente con ganador
+      const nuevoPartidoId = enfResult.insertId;
+
       if (esBye) {
-        await conn.query(`
-          INSERT INTO detalle_partido (partido_id, estado_id, evento_id, fase_id, ganador_id)
-          VALUES (?, 2, ?, ?, ?)
-        `, [enfResult.insertId, eventoId, siguienteFaseId, equipo1.equipo_id]);
+        // Si es un bye, el partido se completa automáticamente
+        await conn.query(
+          'INSERT INTO detalle_partido (partido_id, estado_id, evento_id, fase_id, ganador_id) VALUES (?, 2, ?, ?, ?)',
+          [nuevoPartidoId, eventoId, siguienteFase.id, equipo1.equipo_id]
+        );
       } else {
-        await conn.query(`
-          INSERT INTO detalle_partido (partido_id, estado_id, evento_id, fase_id)
-          VALUES (?, 1, ?, ?)
-        `, [enfResult.insertId, eventoId, siguienteFaseId]);
+        // Si es un partido normal, se crea como 'pendiente'
+        await conn.query(
+          'INSERT INTO detalle_partido (partido_id, estado_id, evento_id, fase_id) VALUES (?, 1, ?, ?)',
+          [nuevoPartidoId, eventoId, siguienteFase.id]
+        );
       }
 
       partidosNuevos.push({
-        enfrentamiento_id: enfResult.insertId,
-        partido_numero: Math.floor(i / 2) + 1,
+        enfrentamiento_id: nuevoPartidoId,
+        partido_numero: nuevoPartidoNumero,
         equipo_1_id: equipo1.equipo_id,
-        equipo_2_id: equipo2?.equipo_id || null,
+        equipo_2_id: esBye ? null : equipo2.equipo_id,
         es_bye: esBye
       });
+
+      nuevoPartidoNumero++;
     }
 
     await conn.commit();
 
     res.json({
-      mensaje: 'Ronda avanzada exitosamente',
+      mensaje: 'Ronda avanzada exitosamente. Se han creado nuevos enfrentamientos.',
       fase_anterior: {
         id: faseActualId,
         orden: faseActual[0].orden
       },
       siguiente_fase: {
-        id: siguienteFaseId,
-        nombre: siguienteFase[0].nombre,
-        orden: siguienteFase[0].orden
+        id: siguienteFase.id,
+        nombre: siguienteFase.nombre,
+        orden: siguienteFase.orden
       },
       partidos_nuevos: partidosNuevos,
       debug: {
-        ganadores_partidos: ganadores.length,
-        equipos_con_bye: equiposQueDescansaron.length,
-        total_equipos_siguiente_fase: equiposParaSiguienteFase.length
+        total_equipos_siguiente_fase: equiposQueAvanzan.length
       }
     });
 
@@ -531,6 +612,170 @@ torneo.delete("/:deporteId", async (req, res) => {
     });
   } finally {
     conn.release();
+  }
+});
+
+const ESTADOS = {
+  EN_PROGRESO: 5,
+  FINALIZADO: 2,
+};
+
+// Utilidad para obtener fecha formateada
+const obtenerFechaActual = () => {
+  return new Date().toISOString().slice(0, 19).replace("T", " ");
+};
+
+// Función: actualizar a "en_progreso"
+async function actualizarEnProgreso(id, fase_id, fecha_inicio) {
+  await query(
+    `UPDATE detalle_partido SET estado_id = ?, fase_id = ?, fecha_inicio = ? WHERE id = ?`,
+    [ESTADOS.EN_PROGRESO, fase_id, fecha_inicio, id]
+  );
+}
+
+// Función: actualizar a "finalizado"
+async function actualizarAFinalizado(id, fase_id, fecha_fin, puntos1, puntos2, ganador_id, perdedor_id) {
+  let puntajeGanador = 0;
+  let puntajePerdedor = 0;
+
+  // Si estamos en la fase final (fase_id === 4), se asignan más puntos al campeón y subcampeón
+  const esFaseFinal = fase_id === 4;
+
+  if (!ganador_id || !perdedor_id) {
+    throw new Error("Ganador y perdedor ID son requeridos para registrar el historial del partido");
+  }
+
+  if (esFaseFinal) {
+    puntajeGanador = 50;
+    puntajePerdedor = 30;
+  }
+
+  // Actualiza el detalle del partido
+  const actualizarDetalle = query(
+    `UPDATE detalle_partido SET 
+      estado_id = ?, 
+      fase_id = ?,
+      fecha_termino = ?,
+      puntos_equipo_1 = ?,
+      puntos_equipo_2 = ?,
+      ganador_id = ?
+    WHERE id = ?`,
+    [ESTADOS.FINALIZADO, fase_id, fecha_fin, puntos1, puntos2, ganador_id, id]
+  );
+
+  // Insertar historial para el ganador
+  const insertarGanador = query(
+    `INSERT INTO historial_partido_equipo 
+      (equipo_id, partido_id, resultado, puntos, fecha_registro) 
+    VALUES (?, ?, ?, ?, ?)`,
+    [ganador_id, id, 'ganado', puntajeGanador, fecha_fin]
+  );
+
+  // Insertar historial para el perdedor
+  const insertarPerdedor = query(
+    `INSERT INTO historial_partido_equipo 
+      (equipo_id, partido_id, resultado, puntos, fecha_registro) 
+    VALUES (?, ?, ?, ?, ?)`,
+    [perdedor_id, id, 'perdido', puntajePerdedor, fecha_fin]
+  );
+
+  // Ejecutar todas las operaciones en paralelo
+  await Promise.all([actualizarDetalle, insertarGanador, insertarPerdedor]);
+}
+
+
+// Función: modificar puntajes sin cambiar estado
+async function modificarResultado(id, puntos1, puntos2, ganador_id) {
+  await query(
+    `UPDATE detalle_partido SET 
+      puntos_equipo_1 = ?, 
+      puntos_equipo_2 = ?,
+      ganador_id = ?
+    WHERE id = ?`,
+    [puntos1, puntos2, ganador_id, id]
+  );
+}
+
+/**
+ * PATCH /api/admin/torneo/enfrentamientos/:detalle_partido_id/partido
+ * Actualiza el estado y resultado de un partido específico.
+ */
+torneo.patch('/enfrentamientos/:detalle_partido_id/partido', async (req, res) => {
+  const { detalle_partido_id } = req.params;
+  const {
+    estado,
+    fase_id,
+    puntos_equipo_1,
+    puntos_equipo_2,
+    ganador_id,
+    perdedor_id
+  } = req.body;
+
+  // Validar estado
+  if (!['en_progreso', 'finalizado', 'modificar'].includes(estado)) {
+    return res.status(400).json({ mensaje: 'Estado inválido' });
+  }
+
+  const fechaActual = obtenerFechaActual();
+
+  try {
+    if (estado === 'en_progreso') {
+      if (fase_id === undefined) {
+        return res.status(400).json({ mensaje: 'Fase ID requerido para estado en progreso' });
+      }
+
+      await actualizarEnProgreso(detalle_partido_id, fase_id, fechaActual);
+      return res.status(200).json({ mensaje: 'Detalle partido actualizado a en progreso' });
+    }
+
+    if (estado === 'finalizado') {
+      if (
+        fase_id === undefined ||
+        puntos_equipo_1 === undefined ||
+        puntos_equipo_2 === undefined ||
+        ganador_id === undefined
+      ) {
+        return res.status(400).json({ mensaje: 'Faltan datos para finalizar el partido' });
+      }
+
+      await actualizarAFinalizado(
+        detalle_partido_id,
+        fase_id,
+        fechaActual,
+        puntos_equipo_1,
+        puntos_equipo_2,
+        ganador_id,
+        perdedor_id
+      );
+
+      return res.status(200).json({ mensaje: 'Detalle partido actualizado a finalizado' });
+    }
+
+    if (estado === 'modificar') {
+      if (
+        puntos_equipo_1 === undefined ||
+        puntos_equipo_2 === undefined ||
+        ganador_id === undefined
+      ) {
+        return res.status(400).json({ mensaje: 'Faltan datos para modificar el resultado' });
+      }
+
+      await modificarResultado(
+        detalle_partido_id,
+        puntos_equipo_1,
+        puntos_equipo_2,
+        ganador_id
+      );
+
+      return res.status(200).json({ mensaje: 'Detalle partido modificado correctamente' });
+    }
+
+  } catch (e) {
+    console.error('❌ Error al actualizar el enfrentamiento:', e.message);
+    return res.status(500).json({
+      mensaje: 'Error al actualizar el enfrentamiento',
+      error: e.message
+    });
   }
 });
 
