@@ -190,23 +190,17 @@ ruta.post("/", subir.single("comprobante"), async (req, res) => {
         break;
 
       case 4: // Ajedrez
-        if (totalJugadores < 1 || totalJugadores > 4) {
+        if (totalJugadores !== 1) {
           await limpiarArchivo(req.file.filename);
           return res.status(400).json({
-            mensaje: "Ajedrez requiere entre 1 y 4 jugadores",
-          });
-        }
-        if (varones > 2 || mujeres > 2) {
-          await limpiarArchivo(req.file.filename);
-          return res.status(400).json({
-            mensaje: "Ajedrez permite máximo 2 varones y 2 mujeres",
+            mensaje: "Para Ajedrez, solo se puede inscribir un jugador a la vez.",
           });
         }
         break;
 
       default:
         // Otros deportes: permitir entre 1 y 20 jugadores sin restricciones
-        if (totalJugadores < 1 || totalJugadores > 20) {
+        if (totalJugadores < 1 || totalJugadores > 33) {
           await limpiarArchivo(req.file.filename);
           return res.status(400).json({
             mensaje: "El número de jugadores debe estar entre 1 y 20",
@@ -214,16 +208,50 @@ ruta.post("/", subir.single("comprobante"), async (req, res) => {
         }
     }
 
-    // 4. Validar que no exista un equipo con el mismo nombre en el mismo ciclo
+    // 3.2 validar que el dni y codigo_estudiante no se repita
+    const dniSet = new Set()
+    const codigoSet = new Set()
+    
+    for (let i = 0; i < dataJugadores.length; i++) {
+      const jugadorVerificar = dataJugadores[i];
+
+      // 3.2.1 Validar el dni
+      if (jugadorVerificar.dni) {
+        if (dniSet.has(jugadorVerificar.dni)) {
+          await limpiarArchivo(req.file.filename);
+          return res.status(400).json({
+            mensaje: `El DNI ${jugadorVerificar.dni} está duplicado en la lista de jugadores`,
+          });
+        }
+        dniSet.add(jugadorVerificar.dni);
+      }
+
+      // 3.2.2 Validar el código de estudiante
+      if (jugadorVerificar.codigo) {
+        if (codigoSet.has(jugadorVerificar.codigo)) {
+          await limpiarArchivo(req.file.filename);
+          return res.status(400).json({
+            mensaje: `El código de estudiante ${jugadorVerificar.codigo} está duplicado en la lista de jugadores`,
+          });
+        }
+        codigoSet.add(jugadorVerificar.codigo);
+      }
+    }
+
+    const isChess = parseInt(deporteId, 10) === 4;
+    // Para ajedrez, el nombre del "equipo" es en realidad el nombre del jugador.
+    const finalEquipoNombre = isChess ? dataJugadores[0].nombre : equipoNombre;
+
+    // 4. Validar que no exista un equipo/participante con el mismo nombre en el mismo ciclo y deporte
     const [equipoExistente] = await conn.execute(
-      "SELECT id FROM equipos WHERE nombre = ? AND ciclo_id = ?",
-      [equipoNombre, cicloId]
+      "SELECT id FROM equipos WHERE nombre = ? AND ciclo_id = ? AND deporte_id = ?",
+      [finalEquipoNombre, cicloId, deporteId]
     );
 
     if (equipoExistente.length > 0) {
       await limpiarArchivo(req.file.filename);
       return res.status(400).json({
-        mensaje: "Ya existe un equipo con este nombre en el ciclo seleccionado",
+        mensaje: `Ya existe un equipo o participante con el nombre "${finalEquipoNombre}" en el ciclo y deporte seleccionado`,
       });
     }
 
@@ -302,7 +330,7 @@ ruta.post("/", subir.single("comprobante"), async (req, res) => {
       // 6.1. Registrar equipo
       const [equipoResult] = await conn.execute(
         "INSERT INTO equipos (nombre, ciclo_id, deporte_id, email, celular, seccion) VALUES (?, ?, ?, ?, ?, ?)",
-        [equipoNombre, cicloId, deporteId, email, celular, seccion]
+        [finalEquipoNombre, cicloId, deporteId, email, celular, seccion]
       );
 
       equipoId = equipoResult.insertId;
