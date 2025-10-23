@@ -107,10 +107,6 @@ torneo.get("/:deporteId", async (req, res) => {
       nombre_equipo: eq.nombre_equipo,
       deporte: eq.deporte,
       ciclo: eq.ciclo,
-      cantidad_participantes: eq.cantidad_participantes,
-      representante_nombre: eq.representante_nombre,
-      representante_telefono: eq.representante_telefono,
-      fecha_inscripcion: eq.fecha_inscripcion,
       estado_inscripcion: eq.estado_inscripcion,
       estado_sorteo: eq.estado_sorteo
     }));
@@ -637,6 +633,11 @@ async function actualizarEnProgreso(id, fase_id, fecha_inicio) {
 async function actualizarAFinalizado(id, fase_id, fecha_fin, puntos1, puntos2, ganador_id, perdedor_id) {
   let puntajeGanador = 0;
   let puntajePerdedor = 0;
+  
+  // Verificar si el equipo es regular o adicional
+  const queryTipoPago = `SELECT tipo_pago FROM inscripciones WHERE equipo_id = ?`; 
+  const [ganadorPago] = await query(queryTipoPago, [ganador_id]);
+  const [perdedorPago] = await query(queryTipoPago, [perdedor_id]);
 
   // Si estamos en la fase final (fase_id === 4), se asignan más puntos al campeón y subcampeón
   const esFaseFinal = fase_id === 4;
@@ -645,9 +646,17 @@ async function actualizarAFinalizado(id, fase_id, fecha_fin, puntos1, puntos2, g
     throw new Error("Ganador y perdedor ID son requeridos para registrar el historial del partido");
   }
 
-  if (esFaseFinal) {
+
+  if (esFaseFinal && ganadorPago?.tipo_pago === 'regular') {
     puntajeGanador = 50;
+  } else if (esFaseFinal && ganadorPago?.tipo_pago === 'adicional') {
+    puntajeGanador = 0;
+  }
+
+  if (esFaseFinal && perdedorPago?.tipo_pago === 'regular') {
     puntajePerdedor = 30;
+  } else if (esFaseFinal && perdedorPago?.tipo_pago === 'adicional') {
+    puntajePerdedor = 0;
   }
 
   // Actualiza el detalle del partido
