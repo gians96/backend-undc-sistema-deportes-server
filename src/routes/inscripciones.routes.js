@@ -4,7 +4,7 @@ import multer from "multer";
 import path from "path";
 import { fileURLToPath } from "url";
 import "dotenv/config";
-import { conexion } from "../config/database.js";
+import { conexion, query } from "../config/database.js";
 
 const __archivo = fileURLToPath(import.meta.url);
 const __directorio = path.dirname(__archivo);
@@ -487,6 +487,49 @@ ruta.post("/", subir.single("comprobante"), async (req, res) => {
       conn.release();
       console.log("🔌 Conexión liberada");
     }
+  }
+});
+
+ruta.get('/', async (req, res) => {
+  try {
+    const [respuesta] = await query('SELECT fecha_inicio, fecha_fin FROM eventos WHERE id = 1');
+    const fechaInicio = new Date(respuesta.fecha_inicio);
+    const fechaFin = new Date(respuesta.fecha_fin);
+    const fechaActual = new Date();
+    
+    const result = {
+      abierto: fechaActual >= fechaInicio,
+      estado: fechaActual <= fechaFin,
+    };
+    
+    // Si la fecha de inicio aún no ha pasado
+    if (!result.abierto) {
+      return res.status(200).json({
+        ...result,
+        mensaje: 'Las inscripciones aún no están abiertas',
+      });
+    }
+
+    // Si la fecha de fin ya pasó
+    if (!result.estado) {
+      return res.status(200).json({
+        ...result,
+        mensaje: 'La fecha límite de inscripción ha pasado',
+      });
+    }
+
+    // Si está dentro del rango
+    return res.status(200).json({
+      ...result,
+      mensaje: 'Las inscripciones están abiertas',
+    });
+
+  } catch (error) {
+    console.error('Error al obtener la fecha límite', error.message);
+    res.status(500).json({
+      mensaje: 'Error al obtener la fecha límite',
+      error: error.message,
+    });
   }
 });
 
