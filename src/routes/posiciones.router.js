@@ -36,27 +36,49 @@ posicion.get("/", limitadorPeticiones, async (req, res) => {
       1: "futsal",
       2: "basquet",
       3: "voley",
+      4: "ajedrez",
       5: "gincana",
     };
 
-    const queryPosiciones = `CALL obtener_posiciones(?)`;
+    // Deportes grupales (usan enfrentamientos y detalle_partido)
+    const deportesGrupalesIds = [1, 2, 3];
+    const queryPosicionesGrupales = `CALL obtener_posiciones(?)`;
 
-    const deportesIds = [1, 2, 3];
-    // El resultado de un SP con 'mysql2' suele ser un array [rows, fields]
-    // por eso mapeamos para quedarnos solo con el primer elemento (rows).
-    const promesas = deportesIds.map(deporteId => 
-      query(queryPosiciones, [deporteId]).then(results => results[0])
+    const promesasGrupales = deportesGrupalesIds.map(deporteId =>
+      query(queryPosicionesGrupales, [deporteId]).then(results => results[0])
     );
 
-    const resultadosPosicionesGrupales = await Promise.all(promesas);
+    const resultadosPosicionesGrupales = await Promise.all(promesasGrupales);
 
     const resultadosGrupales = resultadosPosicionesGrupales.reduce((acc, rows, index) => {
-      const deporte = deportesMap[deportesIds[index]];
+      const deporte = deportesMap[deportesGrupalesIds[index]];
       acc[deporte] = rows;
       return acc;
     }, {});
 
-    res.status(200).json(resultadosGrupales);
+    // Deportes individuales (usan enfrentamientos_individual y detalle_enfrentamiento)
+    const deportesIndividualesIds = [4]; // Ajedrez
+    const queryPosicionesIndividuales = `CALL obtener_posiciones_individuales(?)`;
+
+    const promesasIndividuales = deportesIndividualesIds.map(deporteId =>
+      query(queryPosicionesIndividuales, [deporteId]).then(results => results[0])
+    );
+
+    const resultadosPosicionesIndividuales = await Promise.all(promesasIndividuales);
+
+    const resultadosIndividuales = resultadosPosicionesIndividuales.reduce((acc, rows, index) => {
+      const deporte = deportesMap[deportesIndividualesIds[index]];
+      acc[deporte] = rows;
+      return acc;
+    }, {});
+
+    // Combinar resultados grupales e individuales
+    const resultadosFinales = {
+      ...resultadosGrupales,
+      ...resultadosIndividuales
+    };
+
+    res.status(200).json(resultadosFinales);
 
   } catch (error) {
     console.error("Error al obtener la tabla de posiciones", error.message);
